@@ -36,11 +36,19 @@ if pim_file is not None and sku_file is not None:
         # DATA PROCESSING LOGIC
         # =====================================================================
         merged_df = pd.merge(sku_df[['SKU']], pim_df, on="SKU", how="left")
-
-        if "UPC" in merged_df.columns:
-            merged_df["UPC"] = merged_df["UPC"].fillna('').astype(str).str.replace(r'\.0$', '', regex=True)
-
         num_rows = len(merged_df)
+
+
+        # --- SAFE GET HELPER (Fixes the Pandas 'dtype str' bug) ---
+        def safe_get(col_name):
+            if col_name in merged_df.columns:
+                return merged_df[col_name].fillna("").astype(str)
+            return pd.Series([""] * num_rows)
+
+
+        # --- FIX FOR UPC NUMBERS ---
+        if "UPC" in merged_df.columns:
+            merged_df["UPC"] = safe_get("UPC").str.replace(r'\.0$', '', regex=True)
 
         columns = [
             "SEASON", "Season\n(Remark Carryover)", "Picture", "Category",
@@ -51,35 +59,39 @@ if pim_file is not None and sku_file is not None:
             "Delivery", "RMB-Incl.VAT", "HKD.1", "TWD.1", "MOP.1", "Size.1"
         ]
 
-        df_out = pd.DataFrame(index=range(num_rows), columns=columns)
+        # Initialize Dataframe and fill any default NaNs with empty strings
+        df_out = pd.DataFrame(index=range(num_rows), columns=columns).fillna("")
 
+        # Static Values
         df_out["SEASON"] = "F26"
         df_out["Season\n(Remark Carryover)"] = "F26"
-        df_out["Style Color"] = merged_df["SKU"]
-        df_out["Style Code"] = merged_df["SKU"]
-        df_out["UPC"] = merged_df.get("UPC", "")
-        df_out["Category"] = merged_df.get("Product Type", "")
-        df_out["Picture"] = merged_df.get("Main Image", "")
+
+        # Universal Dynamic Values
+        df_out["Style Color"] = safe_get("SKU")
+        df_out["Style Code"] = safe_get("SKU")
+        df_out["UPC"] = safe_get("UPC")
+        df_out["Category"] = safe_get("Product Type")
+        df_out["Picture"] = safe_get("Main Image")
 
         # =====================================================================
         # --- CONDITIONAL MAPPINGS (WATCHES VS JEWELRY) ---
         # =====================================================================
-        if "Product Type" in merged_df.columns:
-            is_jewelry = merged_df["Product Type"].astype(str).str.upper().str.contains("JEWELRY", na=False)
-        else:
-            is_jewelry = pd.Series(False, index=merged_df.index)
+        is_jewelry = safe_get("Product Type").str.upper().str.contains("JEWELRY", na=False)
 
-        df_out["Group "] = merged_df.get("Platform", "")
+        # 1. GROUP COLUMN
+        df_out["Group "] = safe_get("Platform")
         if "Group" in merged_df.columns:
-            df_out.loc[is_jewelry, "Group "] = merged_df.loc[is_jewelry, "Group"]
+            df_out.loc[is_jewelry, "Group "] = merged_df.loc[is_jewelry, "Group"].fillna("").astype(str)
 
-        df_out["Subgroup"] = merged_df.get("Platform", "")
+        # 2. SUBGROUP COLUMN
+        df_out["Subgroup"] = safe_get("Platform")
         if "Primary Color Jewelry" in merged_df.columns:
-            df_out.loc[is_jewelry, "Subgroup"] = merged_df.loc[is_jewelry, "Primary Color Jewelry"]
+            df_out.loc[is_jewelry, "Subgroup"] = merged_df.loc[is_jewelry, "Primary Color Jewelry"].fillna("").astype(
+                str)
 
-        platform_str = merged_df.get("Platform", pd.Series(dtype=str)).fillna("").astype(str)
-        size_str = merged_df.get("Case Size", pd.Series(dtype=str)).fillna("").astype(str).str.replace(r'\.0$', '',
-                                                                                                       regex=True)
+        # 3. STYLE DESCRIPTION COLUMN
+        platform_str = safe_get("Platform")
+        size_str = safe_get("Case Size").str.replace(r'\.0$', '', regex=True)
         df_out["Style Description"] = (platform_str + " " + size_str).str.strip()
 
         if "Product Name" in merged_df.columns:
@@ -93,26 +105,40 @@ if pim_file is not None and sku_file is not None:
 
 
             merged_df["Cleaned Product Name"] = merged_df.apply(clean_jewelry_description, axis=1)
-            df_out.loc[is_jewelry, "Style Description"] = merged_df.loc[is_jewelry, "Cleaned Product Name"]
+            df_out.loc[is_jewelry, "Style Description"] = merged_df.loc[is_jewelry, "Cleaned Product Name"].fillna(
+                "").astype(str)
         else:
             df_out.loc[is_jewelry, "Style Description"] = ""
 
+        # 4. COLOR CODE COLUMN
         df_out["Color Code"] = "-"
-        df_out.loc[is_jewelry, "Color Code"] = merged_df.get("SAP Color", "")
+        if "SAP Color" in merged_df.columns:
+            df_out.loc[is_jewelry, "Color Code"] = merged_df.loc[is_jewelry, "SAP Color"].fillna("").astype(str)
 
-        df_out["Color Name"] = merged_df.get("Ecomm Top Ring Color", "")
+        # 5. COLOR NAME COLUMN
+        df_out["Color Name"] = safe_get("Ecomm Top Ring Color")
         if "Silhouette Jewelry" in merged_df.columns:
-            df_out.loc[is_jewelry, "Color Name"] = merged_df.loc[is_jewelry, "Silhouette Jewelry"]
+            df_out.loc[is_jewelry, "Color Name"] = merged_df.loc[is_jewelry, "Silhouette Jewelry"].fillna("").astype(
+                str)
 
-        df_out["Size"] = merged_df.get("Case Size", "")
-        df_out["Size.1"] = ""
+        # 6. SIZE COLUMN
+        df_out["Size"] = safe_get("Case Size")
+        df_out["Size.1"] = safe_get("Case Size")
         df_out.loc[is_jewelry, "Size"] = "-"
 
-        df_out["Material Description"] = merged_df.get("Ecomm Case Material", "")
+        # 7. MATERIAL DESCRIPTION COLUMN
+        df_out["Material Description"] = safe_get("Ecomm Case Material")
         if "Primary Material Jewelry" in merged_df.columns:
-            df_out.loc[is_jewelry, "Material Description"] = merged_df.loc[is_jewelry, "Primary Material Jewelry"]
+            df_out.loc[is_jewelry, "Material Description"] = merged_df.loc[
+                is_jewelry, "Primary Material Jewelry"].fillna("").astype(str)
+
+        # Force the entire Dataframe to pure strings to ensure Openpyxl doesn't crash on hidden floats
+        df_out = df_out.fillna("").astype(str)
 
 
+        # =====================================================================
+        # HIGH-SPEED IMAGE DOWNLOADER
+        # =====================================================================
         def fetch_image(url):
             try:
                 response = requests.get(str(url).strip(), timeout=5)
@@ -124,8 +150,7 @@ if pim_file is not None and sku_file is not None:
 
 
         def generate_assortment_excel(df):
-            unique_urls = [url for url in df["Picture"].unique() if
-                           pd.notna(url) and str(url).strip().startswith("http")]
+            unique_urls = [url for url in df["Picture"].unique() if url and str(url).strip().startswith("http")]
             image_cache = {}
 
             if unique_urls:
@@ -151,7 +176,6 @@ if pim_file is not None and sku_file is not None:
                 header_font = Font(bold=True, color="000000")
                 header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
-                # Strictly NO wrap text for data
                 data_center = Alignment(horizontal='center', vertical='center', wrap_text=False)
                 data_left = Alignment(horizontal='left', vertical='center', wrap_text=False)
 
@@ -171,9 +195,6 @@ if pim_file is not None and sku_file is not None:
                 worksheet.cell(row=5, column=23, value=164)
                 worksheet.cell(row=5, column=24, value=549)
                 worksheet.cell(row=5, column=25, value=142)
-
-                # COMPLETELY REMOVED FREEZE PANES TO PREVENT EXCEL GLITCHES
-                # worksheet.freeze_panes = ...
 
                 # Set general column widths
                 for col_letter in [chr(i) for i in range(65, 91)] + ['AA', 'AB', 'AC', 'AD', 'AE', 'AF']:
@@ -206,7 +227,6 @@ if pim_file is not None and sku_file is not None:
                 for idx, url in enumerate(df["Picture"]):
                     row_number = idx + 7
 
-                    # Set row height larger than image to prevent Excel from hiding text
                     worksheet.row_dimensions[row_number].height = 60
 
                     for col_num in range(1, 33):
@@ -223,7 +243,6 @@ if pim_file is not None and sku_file is not None:
                             image_stream = io.BytesIO(img_bytes)
                             img = OpenpyxlImage(image_stream)
 
-                            # Shrunk image slightly so it doesn't touch cell borders (Prevents glitch)
                             img.width = 65
                             img.height = 65
 
