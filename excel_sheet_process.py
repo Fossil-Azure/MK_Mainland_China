@@ -1,6 +1,11 @@
 import streamlit as st
 import pandas as pd
 import io
+import requests
+import concurrent.futures
+import re
+from openpyxl.drawing.image import Image as OpenpyxlImage
+from openpyxl.styles import Font, Alignment, Border, Side
 
 # Set the page configuration
 st.set_page_config(page_title="Data Processing App", layout="wide")
@@ -22,144 +27,229 @@ with col2:
 # Check if both files have been uploaded
 if pim_file is not None and sku_file is not None:
     try:
-        # Read the uploaded Excel files
         pim_df = pd.read_excel(pim_file)
         sku_df = pd.read_excel(sku_file)
 
-        st.success("Files successfully uploaded! Processing data...")
         st.divider()
 
         # =====================================================================
         # DATA PROCESSING LOGIC
         # =====================================================================
-
-        # Merge the SKU List with the PIM Master Data based on the "SKU" column.
         merged_df = pd.merge(sku_df[['SKU']], pim_df, on="SKU", how="left")
 
-        # --- FIX FOR UPC NUMBERS ---
-        # Fill missing values with an empty string, convert to string, and remove trailing '.0'
         if "UPC" in merged_df.columns:
             merged_df["UPC"] = merged_df["UPC"].fillna('').astype(str).str.replace(r'\.0$', '', regex=True)
 
         num_rows = len(merged_df)
 
-        # ---------------------------------------------------------------------
-        # 1. Item Master Sheet
-        # ---------------------------------------------------------------------
-        df_item_master = pd.DataFrame(index=range(num_rows), columns=[
-            "Purpose Code", "Total Number of line items", "Assigned Identification",
-            "Style Number", "UPC number", "Color Code", "Size code",
-            "Style Description/Platform Name", "Style Color", "Style Size",
-            "Product Description Code"
-        ])
+        columns = [
+            "SEASON", "Season\n(Remark Carryover)", "Picture", "Category",
+            "Style Color", "Group ", "Subgroup", "UPC", "Style Code",
+            "Style Description", "Color Code", "Color Name", "Size",
+            "Material Description", "", "USD", "RMB", "HKD", "TWD", "MOP",
+            "GC TTL Units", "Mainland TTL Units", "HK", "TW", "MC", "Buffer",
+            "Delivery", "RMB-Incl.VAT", "HKD.1", "TWD.1", "MOP.1", "Size.1"
+        ]
 
-        # Static Values
-        df_item_master["Purpose Code"] = 2
-        df_item_master["Total Number of line items"] = 1
-        df_item_master["Assigned Identification"] = 1
+        df_out = pd.DataFrame(index=range(num_rows), columns=columns)
 
-        # Dynamic Values mapped from merged data
-        df_item_master["Style Number"] = merged_df["SKU"]
-        df_item_master["UPC number"] = merged_df["UPC"]
-        df_item_master["Color Code"] = merged_df["SAP Color"]
-        df_item_master["Size code"] = merged_df["Case Size"]
-        df_item_master["Style Description/Platform Name"] = merged_df["Platform"]
-        df_item_master["Style Color"] = merged_df["Case Color"]
-        df_item_master["Style Size"] = merged_df["Case Size"]
-
-        # ---------------------------------------------------------------------
-        # 2. Cost- ML Sheet
-        # ---------------------------------------------------------------------
-        df_cost_ml = pd.DataFrame(index=range(num_rows), columns=[
-            "Relation", "AccountCode", "AccountRelation", "ItemCode",
-            "UPC", "SKU", "From date", "To date", "Unit", "Amount", "Currency"
-        ])
-
-        # Static Values
-        df_cost_ml["Relation"] = "000::Price (Purch)"
-        df_cost_ml["AccountCode"] = "002::All"
-        df_cost_ml["ItemCode"] = "000::Table"
-        df_cost_ml["Unit"] = "Pcs"
-        df_cost_ml["Currency"] = "CNY"
-
-        # Dynamic Values mapped from merged data
-        df_cost_ml["SKU"] = merged_df["SKU"]
-        df_cost_ml["UPC"] = merged_df["UPC"]
-
-        # ---------------------------------------------------------------------
-        # 3. PO ML-FP Sheet
-        # ---------------------------------------------------------------------
-        df_po_ml = pd.DataFrame(index=range(num_rows), columns=[
-            "vendor code", "UPC", "Style", "Color", "Size"
-        ])
-
-        # Static Values
-        df_po_ml["vendor code"] = "V21100001"
-
-        # Dynamic Values mapped from merged data
-        df_po_ml["Style"] = merged_df["SKU"]
-        df_po_ml["Color"] = merged_df["Case Color"]
-        df_po_ml["Size"] = merged_df["Case Size"]
-        # Assuming you also want the cleaned UPC here based on the column name
-        df_po_ml["UPC"] = merged_df["UPC"]
-
-        # ---------------------------------------------------------------------
-        # 4. Price-ML Sheet
-        # ---------------------------------------------------------------------
-        df_price_ml = pd.DataFrame(index=range(num_rows), columns=[
-            "Relation", "AccountCode", "AccountRelation", "ItemCode",
-            "UPC", "SKU", "From date", "To date", "Unit", "Amount", "Currency"
-        ])
-
-        # Static Values
-        df_price_ml["Relation"] = "004::Price (sales)"
-        df_price_ml["AccountCode"] = "002::All"
-        df_price_ml["ItemCode"] = "000::Table"
-        df_price_ml["Unit"] = "Pcs"
-        df_price_ml["Currency"] = "CNY"
-
-        # Dynamic Values mapped from merged data
-        df_price_ml["SKU"] = merged_df["SKU"]
-        df_price_ml["UPC"] = merged_df["UPC"]
-
+        df_out["SEASON"] = "F26"
+        df_out["Season\n(Remark Carryover)"] = "F26"
+        df_out["Style Color"] = merged_df["SKU"]
+        df_out["Style Code"] = merged_df["SKU"]
+        df_out["UPC"] = merged_df.get("UPC", "")
+        df_out["Category"] = merged_df.get("Product Type", "")
+        df_out["Picture"] = merged_df.get("Main Image", "")
 
         # =====================================================================
+        # --- CONDITIONAL MAPPINGS (WATCHES VS JEWELRY) ---
+        # =====================================================================
+        if "Product Type" in merged_df.columns:
+            is_jewelry = merged_df["Product Type"].astype(str).str.upper().str.contains("JEWELRY", na=False)
+        else:
+            is_jewelry = pd.Series(False, index=merged_df.index)
 
-        # Function to generate an Excel file in memory
-        def convert_dfs_to_excel(df_dict):
+        df_out["Group "] = merged_df.get("Platform", "")
+        if "Group" in merged_df.columns:
+            df_out.loc[is_jewelry, "Group "] = merged_df.loc[is_jewelry, "Group"]
+
+        df_out["Subgroup"] = merged_df.get("Platform", "")
+        if "Primary Color Jewelry" in merged_df.columns:
+            df_out.loc[is_jewelry, "Subgroup"] = merged_df.loc[is_jewelry, "Primary Color Jewelry"]
+
+        platform_str = merged_df.get("Platform", pd.Series(dtype=str)).fillna("").astype(str)
+        size_str = merged_df.get("Case Size", pd.Series(dtype=str)).fillna("").astype(str).str.replace(r'\.0$', '',
+                                                                                                       regex=True)
+        df_out["Style Description"] = (platform_str + " " + size_str).str.strip()
+
+        if "Product Name" in merged_df.columns:
+            def clean_jewelry_description(row):
+                p_name = str(row.get("Product Name", "")) if pd.notna(row.get("Product Name")) else ""
+                brand = str(row.get("Brand", "")) if pd.notna(row.get("Brand")) else ""
+                if p_name and brand:
+                    cleaned = re.sub(re.escape(brand), '', p_name, flags=re.IGNORECASE)
+                    return cleaned.strip()
+                return p_name.strip()
+
+
+            merged_df["Cleaned Product Name"] = merged_df.apply(clean_jewelry_description, axis=1)
+            df_out.loc[is_jewelry, "Style Description"] = merged_df.loc[is_jewelry, "Cleaned Product Name"]
+        else:
+            df_out.loc[is_jewelry, "Style Description"] = ""
+
+        df_out["Color Code"] = "-"
+        df_out.loc[is_jewelry, "Color Code"] = merged_df.get("SAP Color", "")
+
+        df_out["Color Name"] = merged_df.get("Ecomm Top Ring Color", "")
+        if "Silhouette Jewelry" in merged_df.columns:
+            df_out.loc[is_jewelry, "Color Name"] = merged_df.loc[is_jewelry, "Silhouette Jewelry"]
+
+        df_out["Size"] = merged_df.get("Case Size", "")
+        df_out["Size.1"] = ""
+        df_out.loc[is_jewelry, "Size"] = "-"
+
+        df_out["Material Description"] = merged_df.get("Ecomm Case Material", "")
+        if "Primary Material Jewelry" in merged_df.columns:
+            df_out.loc[is_jewelry, "Material Description"] = merged_df.loc[is_jewelry, "Primary Material Jewelry"]
+
+
+        def fetch_image(url):
+            try:
+                response = requests.get(str(url).strip(), timeout=5)
+                if response.status_code == 200:
+                    return url, response.content
+            except:
+                pass
+            return url, None
+
+
+        def generate_assortment_excel(df):
+            unique_urls = [url for url in df["Picture"].unique() if
+                           pd.notna(url) and str(url).strip().startswith("http")]
+            image_cache = {}
+
+            if unique_urls:
+                st.info("Downloading images...")
+                progress_bar = st.progress(0)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+                    futures = {executor.submit(fetch_image, url): url for url in unique_urls}
+                    for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                        url = futures[future]
+                        image_cache[url] = future.result()[1]
+                        progress_bar.progress((i + 1) / len(unique_urls))
+                progress_bar.empty()
+
+            st.info("Constructing and formatting the Excel file...")
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                for sheet_name, df in df_dict.items():
-                    df.to_excel(writer, index=False, sheet_name=sheet_name)
-            processed_data = output.getvalue()
-            return processed_data
+                df.to_excel(writer, index=False, startrow=5, sheet_name="F26 LICENSEE")
+                worksheet = writer.sheets["F26 LICENSEE"]
+
+                # =============================================================
+                # STYLES DEFINITION
+                # =============================================================
+                header_font = Font(bold=True, color="000000")
+                header_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+                # Strictly NO wrap text for data
+                data_center = Alignment(horizontal='center', vertical='center', wrap_text=False)
+                data_left = Alignment(horizontal='left', vertical='center', wrap_text=False)
+
+                thin_border = Border(
+                    left=Side(style='thin', color='BFBFBF'), right=Side(style='thin', color='BFBFBF'),
+                    top=Side(style='thin', color='BFBFBF'), bottom=Side(style='thin', color='BFBFBF')
+                )
+
+                worksheet.cell(row=2, column=16, value="PRICE")
+                worksheet.cell(row=2, column=21, value="ORDER UNITS")
+                worksheet.cell(row=2, column=27, value="DELIVERY")
+                worksheet.cell(row=2, column=28, value="COST")
+                worksheet.cell(row=3, column=1, value="F26")
+
+                worksheet.cell(row=5, column=21, value=2400)
+                worksheet.cell(row=5, column=22, value=1545)
+                worksheet.cell(row=5, column=23, value=164)
+                worksheet.cell(row=5, column=24, value=549)
+                worksheet.cell(row=5, column=25, value=142)
+
+                # COMPLETELY REMOVED FREEZE PANES TO PREVENT EXCEL GLITCHES
+                # worksheet.freeze_panes = ...
+
+                # Set general column widths
+                for col_letter in [chr(i) for i in range(65, 91)] + ['AA', 'AB', 'AC', 'AD', 'AE', 'AF']:
+                    worksheet.column_dimensions[col_letter].width = 15
+
+                worksheet.column_dimensions['C'].width = 10.5
+                worksheet.column_dimensions['O'].width = 3
+
+                # Format Headers (Row 6)
+                for col_num in range(1, 33):
+                    cell = worksheet.cell(row=6, column=col_num)
+                    cell.font = header_font
+                    cell.alignment = header_align
+                    cell.border = thin_border
+
+                # Format Top Section Headers (Row 2 & 5)
+                for col_num in [16, 21, 27, 28]:
+                    cell = worksheet.cell(row=2, column=col_num)
+                    cell.font = header_font
+                    cell.alignment = header_align
+                    cell.border = thin_border
+
+                for col_num in range(21, 26):
+                    cell = worksheet.cell(row=5, column=col_num)
+                    cell.font = header_font
+                    cell.alignment = header_align
+                    cell.border = thin_border
+
+                # Fill Data Rows & Apply Formatting
+                for idx, url in enumerate(df["Picture"]):
+                    row_number = idx + 7
+
+                    # Set row height larger than image to prevent Excel from hiding text
+                    worksheet.row_dimensions[row_number].height = 60
+
+                    for col_num in range(1, 33):
+                        cell = worksheet.cell(row=row_number, column=col_num)
+                        cell.alignment = data_center if col_num not in [10, 14] else data_left
+                        cell.border = thin_border
+
+                    cell_ref = f"C{row_number}"
+                    worksheet[cell_ref].value = ""
+
+                    img_bytes = image_cache.get(url)
+                    if img_bytes:
+                        try:
+                            image_stream = io.BytesIO(img_bytes)
+                            img = OpenpyxlImage(image_stream)
+
+                            # Shrunk image slightly so it doesn't touch cell borders (Prevents glitch)
+                            img.width = 65
+                            img.height = 65
+
+                            worksheet.add_image(img, cell_ref)
+                        except Exception:
+                            worksheet[cell_ref].value = "Img Format Error"
+                    elif pd.notna(url) and str(url).strip().startswith("http"):
+                        worksheet[cell_ref].value = "Link Error"
+
+            return output.getvalue()
 
 
-        # Dictionary mapping the sheet names to their respective DataFrames
-        sheets_to_export = {
-            "Item Master": df_item_master,
-            "Cost- ML": df_cost_ml,
-            "PO ML-FP": df_po_ml,
-            "Price-ML": df_price_ml
-        }
+        excel_data = generate_assortment_excel(df_out)
 
-        # Generate the final Excel file bytes
-        excel_data = convert_dfs_to_excel(sheets_to_export)
+        st.success("File successfully generated! Formatting and images are applied.")
 
-        # Display the Download section
         st.subheader("Download Output")
-        st.write("Your processed Excel file is ready. Click the button below to download it.")
-
         st.download_button(
-            label="📥 Download Processed Excel File",
+            label="📥 Download Formatted Excel File",
             data=excel_data,
-            file_name="MK_Mainline_Output.xlsx",
+            file_name="Assortment_Formatted_Output.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     except KeyError as e:
-        st.error(
-            f"Mapping Error: Could not find the expected column in your uploaded files. Please ensure the column {e} exists and is spelled exactly as expected.")
+        st.error(f"Mapping Error: Could not find column {e}.")
     except Exception as e:
         st.error(f"An error occurred: {e}")
 
